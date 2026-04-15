@@ -232,3 +232,90 @@ def process_dataset(
         print(f"episode_{episode_index:03d}: {len(frames_by_episode[episode_index])} frames")
 
     return dataset_export_dir
+
+
+def find_episode_dir(export_dir: Path, dataset_id: str, episode_id: int) -> Path:
+    dataset_export_dir = export_dir / dataset_id.replace("/", "_")
+    episode_dir = dataset_export_dir / f"episode_{episode_id:03d}"
+    if not episode_dir.exists():
+        raise FileNotFoundError(f"Episode directory not found: {episode_dir}")
+    return episode_dir
+
+
+def build_cosmos_depth_spec(
+    *,
+    name: str,
+    video_path: Path,
+    prompt_path: Path,
+    spec_path: Path,
+    guidance: int,
+) -> Path:
+    spec = {
+        "name": name,
+        "prompt_path": str(prompt_path),
+        "video_path": str(video_path),
+        "guidance": guidance,
+        "depth": {
+            "control_weight": 1.0,
+        },
+    }
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+    return spec_path
+
+
+def run_cosmos_depth_inference_for_episode(
+    *,
+    dataset_id: str,
+    episode_id: int,
+    export_dir: Path,
+    cosmos_root: Path,
+    cosmos_python: Path,
+    cosmos_prompt_path: Path,
+    guidance: int = 3,
+) -> Path:
+    episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
+    input_videos = sorted(episode_dir.glob("*.mp4"))
+    if not input_videos:
+        raise FileNotFoundError(f"No input videos found in {episode_dir}")
+
+    cosmos_run_dir = episode_dir / "cosmos_depth"
+    specs_dir = cosmos_run_dir / "specs"
+    outputs_dir = cosmos_run_dir / "outputs"
+    generated_dir = cosmos_run_dir / "generated"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    for video_path in input_videos:
+        video_stem = video_path.stem
+        job_name = f"episode_{episode_id:03d}_{video_stem}_depth"
+        spec_path = build_cosmos_depth_spec(
+            name=job_name,
+            video_path=video_path.resolve(),
+            prompt_path=cosmos_prompt_path.resolve(),
+            spec_path=specs_dir / f"{job_name}.json",
+            guidance=guidance,
+        )
+        job_output_dir = outputs_dir / video_stem
+        job_output_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            str(cosmos_python),
+            "examples/inference.py",
+            "--model",
+            "depth",
+            "-i",
+            str(spec_path.resolve()),
+            "-o",
+            str(job_output_dir.resolve()),
+        ]
+        subprocess.run(cmd, check=True, cwd=str(cosmos_root))
+
+        generated_video = job_output_dir / f"{job_name}.mp4"
+        if not generated_video.exists():
+            raise FileNotFoundError(f"Expected generated video not found: {generated_video}")
+
+        shutil.copy2(generated_video, generated_dir / f"{video_stem}_generated.mp4")
+
+    return cosmos_run_dir
