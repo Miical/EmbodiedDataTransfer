@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import urllib.request
@@ -9,7 +10,7 @@ from typing import Any
 
 import pandas as pd
 from datasets import load_dataset
-from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download
 
 
 def to_serializable(value: Any) -> Any:
@@ -66,6 +67,15 @@ def group_rows_by_episode(dataset: Any) -> dict[int, list[dict[str, Any]]]:
 def read_dataset_info(dataset_id: str, raw_dir: Path) -> dict[str, Any]:
     info_path = download_dataset_file(dataset_id, "meta/info.json", raw_dir)
     return json.loads(info_path.read_text(encoding="utf-8"))
+
+
+def download_root_repo_files(dataset_id: str, local_dir: Path) -> None:
+    for filename in ["README.md", ".gitattributes"]:
+        try:
+            download_dataset_file(dataset_id, filename, local_dir)
+        except Exception:
+            # Some datasets may not expose both files; keep initialization permissive.
+            pass
 
 
 def download_episode_metadata(dataset_id: str, raw_dir: Path, repo_paths: list[str]) -> list[Path]:
@@ -322,3 +332,198 @@ def run_cosmos_depth_inference_for_episode(
         shutil.copy2(generated_video, generated_dir / f"{video_stem}_generated.mp4")
 
     return cosmos_run_dir
+
+
+def dataset_dir_name(dataset_id: str) -> str:
+    return dataset_id.replace("/", "_")
+
+
+def augmented_dataset_dir_name(dataset_id: str) -> str:
+    return f"{dataset_dir_name(dataset_id)}_augmented"
+
+
+def augmented_repo_id(dataset_id: str) -> str:
+    owner, name = dataset_id.split("/", maxsplit=1)
+    return f"{owner}/{name}-augmented"
+
+
+def load_json_file(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def initialize_augmented_dataset(raw_dir: Path, dataset_id: str, augmented_root: Path) -> Path:
+    target_dir = augmented_root / augmented_dataset_dir_name(dataset_id)
+    if target_dir.exists():
+        return target_dir
+    shutil.copytree(raw_dir, target_dir, ignore=shutil.ignore_patterns(".cache"))
+    download_root_repo_files(dataset_id, target_dir)
+    return target_dir
+
+
+def next_file_index(pattern: str, root: Path) -> int:
+    files = sorted(root.glob(pattern))
+    if not files:
+        return 0
+    return max(int(path.stem.split("-")[-1]) for path in files) + 1
+
+
+def directory_size_mb(path: Path) -> int:
+    total_bytes = sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+    return int((total_bytes + 1024 * 1024 - 1) // (1024 * 1024))
+
+
+def ffprobe_duration_seconds(path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return float(result.stdout.strip())
+
+
+def append_generated_episode_to_dataset(
+    *,
+    dataset_id: str,
+    episode_id: int,
+    export_dir: Path,
+    raw_dir: Path,
+    augmented_root: Path,
+) -> Path:
+    source_episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
+    generated_dir = source_episode_dir / "cosmos_depth" / "generated"
+    if not generated_dir.exists():
+        raise FileNotFoundError(f"Generated video directory not found: {generated_dir}")
+
+    target_dir = initialize_augmented_dataset(raw_dir=raw_dir, dataset_id=dataset_id, augmented_root=augmented_root)
+    manifest_path = target_dir / "meta" / "augmentation_manifest.json"
+    manifest = load_json_file(manifest_path) if manifest_path.exists() else {"source_dataset": dataset_id, "appended": []}
+    if any(item["source_episode_id"] == episode_id for item in manifest["appended"]):
+        raise ValueError(f"Episode {episode_id} has already been appended to {target_dir}")
+
+    info_path = target_dir / "meta" / "info.json"
+    info = load_json_file(info_path)
+
+    new_episode_index = int(info["total_episodes"])
+    new_frame_start_index = int(info["total_frames"])
+
+    data_chunk_dir = target_dir / "data" / "chunk-000"
+    meta_chunk_dir = target_dir / "meta" / "episodes" / "chunk-000"
+    data_chunk_dir.mkdir(parents=True, exist_ok=True)
+    meta_chunk_dir.mkdir(parents=True, exist_ok=True)
+
+    data_file_index = next_file_index("file-*.parquet", data_chunk_dir)
+    meta_file_index = next_file_index("file-*.parquet", meta_chunk_dir)
+
+    frames = load_json_file(source_episode_dir / "frames.json")
+    updated_frames: list[dict[str, Any]] = []
+    for offset, frame in enumerate(frames):
+        frame = dict(frame)
+        frame["episode_index"] = new_episode_index
+        frame["index"] = new_frame_start_index + offset
+        updated_frames.append(frame)
+
+    frame_df = pd.DataFrame(updated_frames)
+    data_file_path = data_chunk_dir / f"file-{data_file_index:03d}.parquet"
+    frame_df.to_parquet(data_file_path, index=False)
+
+    source_episode_meta = load_json_file(source_episode_dir / "episode_meta.json")
+    new_episode_meta = dict(source_episode_meta)
+    new_episode_meta["episode_index"] = new_episode_index
+    new_episode_meta["data/chunk_index"] = 0
+    new_episode_meta["data/file_index"] = data_file_index
+    new_episode_meta["dataset_from_index"] = new_frame_start_index
+    new_episode_meta["dataset_to_index"] = new_frame_start_index + len(updated_frames)
+
+    video_keys = [key for key, spec in info["features"].items() if spec.get("dtype") == "video"]
+    for video_key in video_keys:
+        source_video = generated_dir / f"{video_key}_generated.mp4"
+        if not source_video.exists():
+            raise FileNotFoundError(f"Generated video missing for {video_key}: {source_video}")
+        target_video_dir = target_dir / "videos" / video_key / "chunk-000"
+        target_video_dir.mkdir(parents=True, exist_ok=True)
+        video_file_index = next_file_index("file-*.mp4", target_video_dir)
+        target_video = target_video_dir / f"file-{video_file_index:03d}.mp4"
+        shutil.copy2(source_video, target_video)
+
+        duration = ffprobe_duration_seconds(target_video)
+        new_episode_meta[f"videos/{video_key}/chunk_index"] = 0
+        new_episode_meta[f"videos/{video_key}/file_index"] = video_file_index
+        new_episode_meta[f"videos/{video_key}/from_timestamp"] = 0.0
+        new_episode_meta[f"videos/{video_key}/to_timestamp"] = duration
+
+    meta_file_path = meta_chunk_dir / f"file-{meta_file_index:03d}.parquet"
+    pd.DataFrame([new_episode_meta]).to_parquet(meta_file_path, index=False)
+
+    info["total_episodes"] = new_episode_index + 1
+    info["total_frames"] = new_frame_start_index + len(updated_frames)
+    info["splits"]["train"] = f"0:{info['total_episodes']}"
+    info["data_files_size_in_mb"] = directory_size_mb(target_dir / "data")
+    info["video_files_size_in_mb"] = directory_size_mb(target_dir / "videos")
+    write_json_file(info_path, info)
+
+    manifest["appended"].append(
+        {
+            "source_episode_id": episode_id,
+            "new_episode_index": new_episode_index,
+            "data_file": str(data_file_path.relative_to(target_dir)),
+            "meta_file": str(meta_file_path.relative_to(target_dir)),
+        }
+    )
+    write_json_file(manifest_path, manifest)
+
+    print(f"Appended source episode {episode_id} as episode {new_episode_index}")
+    print(f"Target dataset: {target_dir}")
+    print(f"Frames written: {len(updated_frames)}")
+    return target_dir
+
+
+def upload_dataset_to_hf(target_dir: Path, repo_id: str, token: str, message: str) -> str:
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
+    return api.upload_folder(
+        repo_id=repo_id,
+        repo_type="dataset",
+        folder_path=str(target_dir),
+        commit_message=message,
+        ignore_patterns=[".cache/*"],
+    )
+
+
+def append_generated_episode_and_upload(
+    *,
+    dataset_id: str,
+    episode_id: int,
+    export_dir: Path,
+    raw_dir: Path,
+    augmented_root: Path,
+    hf_repo_id: str,
+    hf_token_env_var: str = "HF_TOKEN",
+) -> tuple[Path, str]:
+    token = os.environ.get(hf_token_env_var)
+    if not token:
+        raise ValueError(f"Missing Hugging Face token in environment variable: {hf_token_env_var}")
+    target_dir = append_generated_episode_to_dataset(
+        dataset_id=dataset_id,
+        episode_id=episode_id,
+        export_dir=export_dir,
+        raw_dir=raw_dir,
+        augmented_root=augmented_root,
+    )
+    commit_url = upload_dataset_to_hf(
+        target_dir=target_dir,
+        repo_id=hf_repo_id,
+        token=token,
+        message=f"Append generated episode {episode_id} from {dataset_id}",
+    )
+    return target_dir, commit_url

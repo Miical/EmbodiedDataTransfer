@@ -4,6 +4,9 @@ import argparse
 from pathlib import Path
 
 from embodied_data_transfer.dataset_workflow import (
+    append_generated_episode_to_dataset,
+    append_generated_episode_and_upload,
+    augmented_repo_id,
     inspect_dataset,
     process_dataset,
     run_cosmos_depth_inference_for_episode,
@@ -69,6 +72,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument("--guidance", type=int, default=3)
 
+    append_parser = subparsers.add_parser(
+        "append-episode",
+        help="Append one generated episode into a new local augmented LeRobot-style dataset.",
+    )
+    append_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
+    append_parser.add_argument("--episode-id", type=int, required=True)
+    append_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
+    append_parser.add_argument("--raw-dir", type=Path, default=Path("data/hf_raw"))
+    append_parser.add_argument("--target-dir", type=Path, default=Path("data/augmented_datasets"))
+
+    append_upload_parser = subparsers.add_parser(
+        "append-and-upload",
+        help="Append one generated episode into a new local augmented dataset and upload it to Hugging Face.",
+    )
+    append_upload_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
+    append_upload_parser.add_argument("--episode-id", type=int, required=True)
+    append_upload_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
+    append_upload_parser.add_argument("--raw-dir", type=Path, default=Path("data/hf_raw"))
+    append_upload_parser.add_argument("--target-dir", type=Path, default=Path("data/augmented_datasets"))
+    append_upload_parser.add_argument("--hf-repo", default=None)
+    append_upload_parser.add_argument("--hf-token-env", default="HF_TOKEN")
+
     return parser
 
 
@@ -119,6 +144,33 @@ def main() -> None:
             guidance=args.guidance,
         )
         print(f"Cosmos outputs saved under: {run_dir}")
+        return
+
+    if command == "append-episode":
+        target_dir = append_generated_episode_to_dataset(
+            dataset_id=args.dataset,
+            episode_id=args.episode_id,
+            export_dir=args.export_dir,
+            raw_dir=args.raw_dir,
+            augmented_root=args.target_dir,
+        )
+        print(f"Augmented dataset saved under: {target_dir}")
+        return
+
+    if command == "append-and-upload":
+        hf_repo = args.hf_repo or augmented_repo_id(args.dataset)
+        target_dir, commit_url = append_generated_episode_and_upload(
+            dataset_id=args.dataset,
+            episode_id=args.episode_id,
+            export_dir=args.export_dir,
+            raw_dir=args.raw_dir,
+            augmented_root=args.target_dir,
+            hf_repo_id=hf_repo,
+            hf_token_env_var=args.hf_token_env,
+        )
+        print(f"Augmented dataset saved under: {target_dir}")
+        print(f"Uploaded to Hugging Face dataset repo: {hf_repo}")
+        print(f"Upload result: {commit_url}")
         return
 
     raise ValueError(f"Unsupported command: {command}")
