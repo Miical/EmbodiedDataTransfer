@@ -12,7 +12,10 @@ license = { text = "MIT" }
 authors = [
   { name = "liujincheng" },
 ]
-dependencies = []
+dependencies = [
+  "datasets>=2.20.0",
+  "lerobot>=0.4.0",
+]
 
 [project.scripts]
 embodied-data-transfer = "embodied_data_transfer.cli:main"
@@ -22,4 +25,3 @@ path = "src/embodied_data_transfer/__about__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/embodied_data_transfer"]
-
