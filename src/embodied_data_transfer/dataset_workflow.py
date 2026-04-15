@@ -282,11 +282,14 @@ def run_cosmos_depth_inference_for_episode(
     cosmos_run_dir = episode_dir / "cosmos_depth"
     specs_dir = cosmos_run_dir / "specs"
     outputs_dir = cosmos_run_dir / "outputs"
+    batch_output_dir = outputs_dir / "batch"
     generated_dir = cosmos_run_dir / "generated"
     specs_dir.mkdir(parents=True, exist_ok=True)
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    batch_output_dir.mkdir(parents=True, exist_ok=True)
     generated_dir.mkdir(parents=True, exist_ok=True)
 
+    jobs: list[tuple[str, Path]] = []
     for video_path in input_videos:
         video_stem = video_path.stem
         job_name = f"episode_{episode_id:03d}_{video_stem}_depth"
@@ -297,22 +300,22 @@ def run_cosmos_depth_inference_for_episode(
             spec_path=specs_dir / f"{job_name}.json",
             guidance=guidance,
         )
-        job_output_dir = outputs_dir / video_stem
-        job_output_dir.mkdir(parents=True, exist_ok=True)
+        jobs.append((video_stem, spec_path.resolve()))
 
-        cmd = [
-            str(cosmos_python),
-            "examples/inference.py",
-            "--model",
-            "depth",
-            "-i",
-            str(spec_path.resolve()),
-            "-o",
-            str(job_output_dir.resolve()),
-        ]
-        subprocess.run(cmd, check=True, cwd=str(cosmos_root))
+    cmd = [
+        str(cosmos_python),
+        "examples/inference.py",
+        "--model",
+        "depth",
+    ]
+    for _, spec_path in jobs:
+        cmd.extend(["-i", str(spec_path)])
+    cmd.extend(["-o", str(batch_output_dir.resolve())])
+    subprocess.run(cmd, check=True, cwd=str(cosmos_root))
 
-        generated_video = job_output_dir / f"{job_name}.mp4"
+    for video_stem, _ in jobs:
+        job_name = f"episode_{episode_id:03d}_{video_stem}_depth"
+        generated_video = batch_output_dir / f"{job_name}.mp4"
         if not generated_video.exists():
             raise FileNotFoundError(f"Expected generated video not found: {generated_video}")
 
