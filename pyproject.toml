@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "embodied-data-transfer"
+dynamic = ["version"]
+description = "Minimal Python project skeleton for EmbodiedDataTransfer."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "liujincheng" },
+]
+dependencies = []
+
+[project.scripts]
+embodied-data-transfer = "embodied_data_transfer.cli:main"
+
+[tool.hatch.version]
+path = "src/embodied_data_transfer/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/embodied_data_transfer"]
+
