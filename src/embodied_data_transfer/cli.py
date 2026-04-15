@@ -49,6 +49,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     infer_parser.add_argument("--guidance", type=int, default=3)
 
+    run_parser = subparsers.add_parser(
+        "run",
+        help="One-command entrypoint for running Cosmos depth inference on a prepared episode.",
+    )
+    run_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
+    run_parser.add_argument("--episode-id", type=int, required=True)
+    run_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
+    run_parser.add_argument("--cosmos-root", type=Path, default=Path("/workspace/cosmos-transfer2.5"))
+    run_parser.add_argument(
+        "--cosmos-python",
+        type=Path,
+        default=Path("/workspace/cosmos-transfer2.5/.venv/bin/python"),
+    )
+    run_parser.add_argument(
+        "--prompt-path",
+        type=Path,
+        default=Path("/workspace/cosmos-transfer2.5/assets/robot_example/robot_prompt.txt"),
+    )
+    run_parser.add_argument("--guidance", type=int, default=3)
+
     return parser
 
 
@@ -76,6 +96,19 @@ def main() -> None:
         return
 
     if command == "infer-episode":
+        run_dir = run_cosmos_depth_inference_for_episode(
+            dataset_id=args.dataset,
+            episode_id=args.episode_id,
+            export_dir=args.export_dir,
+            cosmos_root=args.cosmos_root,
+            cosmos_python=args.cosmos_python,
+            cosmos_prompt_path=args.prompt_path,
+            guidance=args.guidance,
+        )
+        print(f"Cosmos outputs saved under: {run_dir}")
+        return
+
+    if command == "run":
         run_dir = run_cosmos_depth_inference_for_episode(
             dataset_id=args.dataset,
             episode_id=args.episode_id,
