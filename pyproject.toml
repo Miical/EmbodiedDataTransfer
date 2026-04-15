@@ -14,7 +14,9 @@ authors = [
 ]
 dependencies = [
   "datasets>=2.20.0",
+  "huggingface-hub>=0.25.0",
   "lerobot>=0.4.0",
+  "pandas>=2.0.0",
 ]
 
 [project.scripts]
