@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -281,21 +282,15 @@ def cosmos_run_dir_name(cosmos_model: str) -> str:
     return f"cosmos_{cosmos_model.replace('/', '_')}"
 
 
-def run_cosmos_depth_inference_for_episode(
+def prepare_cosmos_edge_jobs(
     *,
     dataset_id: str,
     episode_id: int,
     export_dir: Path,
-    cosmos_root: Path,
-    cosmos_python: Path,
     cosmos_prompt_path: Path,
-    guidance: int = 3,
-    cosmos_model: str = "edge/distilled",
-    hf_home: Path | None = None,
-    cosmos_experimental_checkpoints: bool = True,
-    nproc_per_node: int = 8,
-    master_port: int = 12341,
-) -> Path:
+    guidance: int,
+    cosmos_model: str,
+) -> tuple[Path, Path, list[tuple[str, Path]]]:
     episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
     input_videos = sorted(episode_dir.glob("*.mp4"))
     if not input_videos:
@@ -324,37 +319,250 @@ def run_cosmos_depth_inference_for_episode(
         )
         jobs.append((video_stem, spec_path.resolve()))
 
-    cmd = [
-        str(cosmos_python),
-        "-m",
-        "torch.distributed.run",
-        f"--nproc_per_node={nproc_per_node}",
-        f"--master_port={master_port}",
-        "examples/inference.py",
-        "--model",
-        cosmos_model,
-        "-i",
-    ]
-    for _, spec_path in jobs:
-        cmd.append(str(spec_path))
-    cmd.extend(["-o", str(batch_output_dir.resolve())])
+    return cosmos_run_dir, batch_output_dir, jobs
+
+
+def build_cosmos_inference_command(
+    *,
+    cosmos_python: Path,
+    cosmos_model: str,
+    spec_paths: list[Path],
+    output_dir: Path,
+    nproc_per_node: int,
+    master_port: int,
+) -> list[str]:
+    if nproc_per_node <= 1:
+        cmd = [
+            str(cosmos_python),
+            "examples/inference.py",
+            "--model",
+            cosmos_model,
+            "-i",
+        ]
+    else:
+        cmd = [
+            str(cosmos_python),
+            "-m",
+            "torch.distributed.run",
+            f"--nproc_per_node={nproc_per_node}",
+            f"--master_port={master_port}",
+            "examples/inference.py",
+            "--model",
+            cosmos_model,
+            "-i",
+        ]
+    cmd.extend(str(path) for path in spec_paths)
+    cmd.extend(["-o", str(output_dir.resolve())])
+    return cmd
+
+
+def build_cosmos_inference_env(
+    *,
+    hf_home: Path | None,
+    cosmos_experimental_checkpoints: bool,
+    gpu_id: int | None = None,
+) -> dict[str, str]:
     env = os.environ.copy()
     if hf_home is not None:
         env["HF_HOME"] = str(hf_home)
     if cosmos_experimental_checkpoints:
         env["COSMOS_EXPERIMENTAL_CHECKPOINTS"] = "1"
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    return env
 
-    subprocess.run(cmd, check=True, cwd=str(cosmos_root), env=env)
 
+def collect_generated_videos(
+    *,
+    episode_id: int,
+    jobs: list[tuple[str, Path]],
+    batch_output_dir: Path,
+    generated_dir: Path,
+) -> None:
+    generated_dir.mkdir(parents=True, exist_ok=True)
     for video_stem, _ in jobs:
         job_name = f"episode_{episode_id:03d}_{video_stem}_edge"
         generated_video = batch_output_dir / f"{job_name}.mp4"
         if not generated_video.exists():
             raise FileNotFoundError(f"Expected generated video not found: {generated_video}")
-
         shutil.copy2(generated_video, generated_dir / f"{video_stem}_generated.mp4")
 
+
+def run_cosmos_depth_inference_for_episode(
+    *,
+    dataset_id: str,
+    episode_id: int,
+    export_dir: Path,
+    cosmos_root: Path,
+    cosmos_python: Path,
+    cosmos_prompt_path: Path,
+    guidance: int = 3,
+    cosmos_model: str = "edge/distilled",
+    hf_home: Path | None = None,
+    cosmos_experimental_checkpoints: bool = True,
+    nproc_per_node: int = 8,
+    master_port: int = 12341,
+) -> Path:
+    cosmos_run_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
+        dataset_id=dataset_id,
+        episode_id=episode_id,
+        export_dir=export_dir,
+        cosmos_prompt_path=cosmos_prompt_path,
+        guidance=guidance,
+        cosmos_model=cosmos_model,
+    )
+    cmd = build_cosmos_inference_command(
+        cosmos_python=cosmos_python,
+        cosmos_model=cosmos_model,
+        spec_paths=[spec_path for _, spec_path in jobs],
+        output_dir=batch_output_dir,
+        nproc_per_node=nproc_per_node,
+        master_port=master_port,
+    )
+    env = build_cosmos_inference_env(
+        hf_home=hf_home,
+        cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
+    )
+
+    subprocess.run(cmd, check=True, cwd=str(cosmos_root), env=env)
+
+    collect_generated_videos(
+        episode_id=episode_id,
+        jobs=jobs,
+        batch_output_dir=batch_output_dir,
+        generated_dir=cosmos_run_dir / "generated",
+    )
+
     return cosmos_run_dir
+
+
+def run_cosmos_depth_inference_parallel_single_gpu(
+    *,
+    dataset_id: str,
+    export_dir: Path,
+    cosmos_root: Path,
+    cosmos_python: Path,
+    cosmos_prompt_path: Path,
+    gpu_ids: list[int],
+    guidance: int = 3,
+    cosmos_model: str = "edge/distilled",
+    hf_home: Path | None = None,
+    cosmos_experimental_checkpoints: bool = True,
+    master_port_start: int = 12341,
+    episode_ids: list[int] | None = None,
+    poll_interval_seconds: float = 2.0,
+) -> list[Path]:
+    selected_episode_ids = episode_ids or list_available_episode_ids(export_dir=export_dir, dataset_id=dataset_id)
+    if not selected_episode_ids:
+        raise ValueError(f"No episode directories found for dataset {dataset_id}")
+    if not gpu_ids:
+        raise ValueError("At least one GPU id is required for parallel single-GPU scheduling")
+
+    pending_episode_ids = list(selected_episode_ids)
+    available_gpu_ids = list(gpu_ids)
+    active_jobs: dict[int, dict[str, Any]] = {}
+    completed_run_dirs: list[Path] = []
+    failures: list[tuple[int, int]] = []
+    worker_offset = 0
+
+    while pending_episode_ids or active_jobs:
+        while pending_episode_ids and available_gpu_ids:
+            episode_id = pending_episode_ids.pop(0)
+            gpu_id = available_gpu_ids.pop(0)
+            master_port = master_port_start + worker_offset
+            worker_offset += 1
+
+            cosmos_run_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
+                dataset_id=dataset_id,
+                episode_id=episode_id,
+                export_dir=export_dir,
+                cosmos_prompt_path=cosmos_prompt_path,
+                guidance=guidance,
+                cosmos_model=cosmos_model,
+            )
+            cmd = build_cosmos_inference_command(
+                cosmos_python=cosmos_python,
+                cosmos_model=cosmos_model,
+                spec_paths=[spec_path for _, spec_path in jobs],
+                output_dir=batch_output_dir,
+                nproc_per_node=1,
+                master_port=master_port,
+            )
+            env = build_cosmos_inference_env(
+                hf_home=hf_home,
+                cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
+                gpu_id=gpu_id,
+            )
+            log_path = cosmos_run_dir / "outputs" / f"worker_gpu{gpu_id}.log"
+            log_handle = log_path.open("w", encoding="utf-8")
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(cosmos_root),
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            active_jobs[process.pid] = {
+                "process": process,
+                "gpu_id": gpu_id,
+                "episode_id": episode_id,
+                "cosmos_run_dir": cosmos_run_dir,
+                "batch_output_dir": batch_output_dir,
+                "jobs": jobs,
+                "log_handle": log_handle,
+                "log_path": log_path,
+            }
+            print(
+                f"Started episode {episode_id} on GPU {gpu_id} "
+                f"(pid={process.pid}, log={log_path})"
+            )
+
+        if not active_jobs:
+            break
+
+        finished_pids: list[int] = []
+        for pid, job in active_jobs.items():
+            process: subprocess.Popen[str] = job["process"]
+            return_code = process.poll()
+            if return_code is None:
+                continue
+
+            finished_pids.append(pid)
+            job["log_handle"].close()
+            available_gpu_ids.append(job["gpu_id"])
+
+            if return_code == 0:
+                collect_generated_videos(
+                    episode_id=job["episode_id"],
+                    jobs=job["jobs"],
+                    batch_output_dir=job["batch_output_dir"],
+                    generated_dir=job["cosmos_run_dir"] / "generated",
+                )
+                completed_run_dirs.append(job["cosmos_run_dir"])
+                print(
+                    f"Finished episode {job['episode_id']} on GPU {job['gpu_id']} "
+                    f"(log={job['log_path']})"
+                )
+            else:
+                failures.append((job["episode_id"], return_code))
+                print(
+                    f"Episode {job['episode_id']} failed on GPU {job['gpu_id']} "
+                    f"with exit code {return_code} (log={job['log_path']})"
+                )
+
+        for pid in finished_pids:
+            active_jobs.pop(pid, None)
+
+        available_gpu_ids.sort()
+        if active_jobs:
+            time.sleep(poll_interval_seconds)
+
+    if failures:
+        failure_summary = ", ".join(f"episode {episode_id} (exit {code})" for episode_id, code in failures)
+        raise RuntimeError(f"Parallel Cosmos inference failed for {failure_summary}")
+
+    return completed_run_dirs
 
 
 def list_available_episode_ids(export_dir: Path, dataset_id: str) -> list[int]:

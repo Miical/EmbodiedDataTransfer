@@ -11,7 +11,12 @@ from embodied_data_transfer.dataset_workflow import (
     process_dataset,
     run_cosmos_depth_inference_for_all_episodes,
     run_cosmos_depth_inference_for_episode,
+    run_cosmos_depth_inference_parallel_single_gpu,
 )
+
+
+def parse_int_list(value: str) -> list[int]:
+    return [int(part.strip()) for part in value.split(",") if part.strip()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -83,6 +88,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_all_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
     add_cosmos_args(run_all_parser)
+
+    run_parallel_parser = subparsers.add_parser(
+        "run-parallel",
+        help="Schedule multiple prepared episodes across multiple GPUs, one single-GPU Cosmos worker per episode.",
+    )
+    run_parallel_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
+    add_cosmos_args(run_parallel_parser)
+    run_parallel_parser.add_argument(
+        "--gpu-ids",
+        type=parse_int_list,
+        required=True,
+        help="Comma-separated GPU ids, for example: 0,1,2,3",
+    )
+    run_parallel_parser.add_argument(
+        "--episode-ids",
+        type=parse_int_list,
+        default=None,
+        help="Optional comma-separated episode ids to run. Defaults to all exported episodes.",
+    )
+    run_parallel_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=2.0,
+        help="Seconds between worker status polls.",
+    )
 
     append_parser = subparsers.add_parser(
         "append-episode",
@@ -183,6 +213,25 @@ def main() -> None:
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             nproc_per_node=args.nproc_per_node,
             master_port=args.master_port,
+        )
+        print(f"Completed {len(run_dirs)} episode runs.")
+        return
+
+    if command == "run-parallel":
+        run_dirs = run_cosmos_depth_inference_parallel_single_gpu(
+            dataset_id=args.dataset,
+            export_dir=args.export_dir,
+            cosmos_root=args.cosmos_root,
+            cosmos_python=args.cosmos_python,
+            cosmos_prompt_path=args.prompt_path,
+            gpu_ids=args.gpu_ids,
+            guidance=args.guidance,
+            cosmos_model=args.cosmos_model,
+            hf_home=args.hf_home,
+            cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
+            master_port_start=args.master_port,
+            episode_ids=args.episode_ids,
+            poll_interval_seconds=args.poll_interval,
         )
         print(f"Completed {len(run_dirs)} episode runs.")
         return
