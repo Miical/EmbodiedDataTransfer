@@ -1,0 +1,5 @@
+You will be given a manipulation video of a single robotic arm, with views from both a wrist camera and a top camera. Your task is to preserve the robot's action, timing, object interaction, camera viewpoint, and overall scene geometry, while gently refining the scene appearance.
+
+Focus on subtle scene tuning rather than changing the task itself. You may adjust environmental attributes such as lighting direction and intensity, light color temperature, shadows, contrast, white balance, surface reflections, background tone, and overall visual atmosphere. The result should look more polished, coherent, and visually appealing, but still realistic and physically plausible for a robotics manipulation setting.
+
+Do not add or remove objects, do not change the robot embodiment, do not alter the manipulated object, and do not modify the underlying motion trajectory. Keep the scene as the same real-world interaction, only with improved appearance and mood. Maintain consistency across frames and across both camera views.

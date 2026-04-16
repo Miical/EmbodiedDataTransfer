@@ -17,6 +17,7 @@ embodied-data-transfer
 ```text
 EmbodiedDataTransfer/
 ├── .gitignore
+├── prompts/
 ├── pyproject.toml
 ├── README.md
 ├── src/
@@ -42,4 +43,3 @@ EmbodiedDataTransfer/
 + dist/
 + *.egg-info/
 + .DS_Store
-
