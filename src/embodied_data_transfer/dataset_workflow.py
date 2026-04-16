@@ -252,7 +252,7 @@ def find_episode_dir(export_dir: Path, dataset_id: str, episode_id: int) -> Path
     return episode_dir
 
 
-def build_cosmos_depth_spec(
+def build_cosmos_edge_spec(
     *,
     name: str,
     video_path: Path,
@@ -265,13 +265,17 @@ def build_cosmos_depth_spec(
         "prompt_path": str(prompt_path),
         "video_path": str(video_path),
         "guidance": guidance,
-        "depth": {
+        "edge": {
             "control_weight": 1.0,
         },
     }
     spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
     return spec_path
+
+
+def cosmos_run_dir_name(cosmos_model: str) -> str:
+    return f"cosmos_{cosmos_model.replace('/', '_')}"
 
 
 def run_cosmos_depth_inference_for_episode(
@@ -283,13 +287,18 @@ def run_cosmos_depth_inference_for_episode(
     cosmos_python: Path,
     cosmos_prompt_path: Path,
     guidance: int = 3,
+    cosmos_model: str = "edge/distilled",
+    hf_home: Path | None = None,
+    cosmos_experimental_checkpoints: bool = True,
+    nproc_per_node: int = 8,
+    master_port: int = 12341,
 ) -> Path:
     episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
     input_videos = sorted(episode_dir.glob("*.mp4"))
     if not input_videos:
         raise FileNotFoundError(f"No input videos found in {episode_dir}")
 
-    cosmos_run_dir = episode_dir / "cosmos_depth"
+    cosmos_run_dir = episode_dir / cosmos_run_dir_name(cosmos_model)
     specs_dir = cosmos_run_dir / "specs"
     outputs_dir = cosmos_run_dir / "outputs"
     batch_output_dir = outputs_dir / "batch"
@@ -302,8 +311,8 @@ def run_cosmos_depth_inference_for_episode(
     jobs: list[tuple[str, Path]] = []
     for video_path in input_videos:
         video_stem = video_path.stem
-        job_name = f"episode_{episode_id:03d}_{video_stem}_depth"
-        spec_path = build_cosmos_depth_spec(
+        job_name = f"episode_{episode_id:03d}_{video_stem}_edge"
+        spec_path = build_cosmos_edge_spec(
             name=job_name,
             video_path=video_path.resolve(),
             prompt_path=cosmos_prompt_path.resolve(),
@@ -314,17 +323,28 @@ def run_cosmos_depth_inference_for_episode(
 
     cmd = [
         str(cosmos_python),
+        "-m",
+        "torch.distributed.run",
+        f"--nproc_per_node={nproc_per_node}",
+        f"--master_port={master_port}",
         "examples/inference.py",
         "--model",
-        "depth",
+        cosmos_model,
+        "-i",
     ]
     for _, spec_path in jobs:
-        cmd.extend(["-i", str(spec_path)])
+        cmd.append(str(spec_path))
     cmd.extend(["-o", str(batch_output_dir.resolve())])
-    subprocess.run(cmd, check=True, cwd=str(cosmos_root))
+    env = os.environ.copy()
+    if hf_home is not None:
+        env["HF_HOME"] = str(hf_home)
+    if cosmos_experimental_checkpoints:
+        env["COSMOS_EXPERIMENTAL_CHECKPOINTS"] = "1"
+
+    subprocess.run(cmd, check=True, cwd=str(cosmos_root), env=env)
 
     for video_stem, _ in jobs:
-        job_name = f"episode_{episode_id:03d}_{video_stem}_depth"
+        job_name = f"episode_{episode_id:03d}_{video_stem}_edge"
         generated_video = batch_output_dir / f"{job_name}.mp4"
         if not generated_video.exists():
             raise FileNotFoundError(f"Expected generated video not found: {generated_video}")
@@ -332,6 +352,61 @@ def run_cosmos_depth_inference_for_episode(
         shutil.copy2(generated_video, generated_dir / f"{video_stem}_generated.mp4")
 
     return cosmos_run_dir
+
+
+def list_available_episode_ids(export_dir: Path, dataset_id: str) -> list[int]:
+    dataset_export_dir = export_dir / dataset_id.replace("/", "_")
+    if not dataset_export_dir.exists():
+        raise FileNotFoundError(f"Processed dataset directory not found: {dataset_export_dir}")
+
+    episode_ids: list[int] = []
+    for episode_dir in sorted(dataset_export_dir.glob("episode_*")):
+        try:
+            episode_ids.append(int(episode_dir.name.split("_")[-1]))
+        except ValueError:
+            continue
+    return episode_ids
+
+
+def run_cosmos_depth_inference_for_all_episodes(
+    *,
+    dataset_id: str,
+    export_dir: Path,
+    cosmos_root: Path,
+    cosmos_python: Path,
+    cosmos_prompt_path: Path,
+    guidance: int = 3,
+    cosmos_model: str = "edge/distilled",
+    hf_home: Path | None = None,
+    cosmos_experimental_checkpoints: bool = True,
+    nproc_per_node: int = 8,
+    master_port: int = 12341,
+    episode_ids: list[int] | None = None,
+) -> list[Path]:
+    selected_episode_ids = episode_ids or list_available_episode_ids(export_dir=export_dir, dataset_id=dataset_id)
+    if not selected_episode_ids:
+        raise ValueError(f"No episode directories found for dataset {dataset_id}")
+
+    run_dirs: list[Path] = []
+    for episode_id in selected_episode_ids:
+        print("=" * 80)
+        print(f"Running Cosmos depth inference for episode {episode_id}")
+        run_dir = run_cosmos_depth_inference_for_episode(
+            dataset_id=dataset_id,
+            episode_id=episode_id,
+            export_dir=export_dir,
+            cosmos_root=cosmos_root,
+            cosmos_python=cosmos_python,
+            cosmos_prompt_path=cosmos_prompt_path,
+            guidance=guidance,
+            cosmos_model=cosmos_model,
+            hf_home=hf_home,
+            cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
+            nproc_per_node=nproc_per_node,
+            master_port=master_port,
+        )
+        run_dirs.append(run_dir)
+    return run_dirs
 
 
 def dataset_dir_name(dataset_id: str) -> str:
@@ -399,9 +474,10 @@ def append_generated_episode_to_dataset(
     export_dir: Path,
     raw_dir: Path,
     augmented_root: Path,
+    cosmos_model: str = "edge/distilled",
 ) -> Path:
     source_episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
-    generated_dir = source_episode_dir / "cosmos_depth" / "generated"
+    generated_dir = source_episode_dir / cosmos_run_dir_name(cosmos_model) / "generated"
     if not generated_dir.exists():
         raise FileNotFoundError(f"Generated video directory not found: {generated_dir}")
 
@@ -509,6 +585,7 @@ def append_generated_episode_and_upload(
     augmented_root: Path,
     hf_repo_id: str,
     hf_token_env_var: str = "HF_TOKEN",
+    cosmos_model: str = "edge/distilled",
 ) -> tuple[Path, str]:
     token = os.environ.get(hf_token_env_var)
     if not token:
@@ -519,6 +596,7 @@ def append_generated_episode_and_upload(
         export_dir=export_dir,
         raw_dir=raw_dir,
         augmented_root=augmented_root,
+        cosmos_model=cosmos_model,
     )
     commit_url = upload_dataset_to_hf(
         target_dir=target_dir,

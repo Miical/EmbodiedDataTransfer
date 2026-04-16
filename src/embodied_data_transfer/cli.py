@@ -9,6 +9,7 @@ from embodied_data_transfer.dataset_workflow import (
     augmented_repo_id,
     inspect_dataset,
     process_dataset,
+    run_cosmos_depth_inference_for_all_episodes,
     run_cosmos_depth_inference_for_episode,
 )
 
@@ -16,6 +17,34 @@ from embodied_data_transfer.dataset_workflow import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Inspect and process Hugging Face / LeRobot datasets.")
     subparsers = parser.add_subparsers(dest="command")
+
+    def add_cosmos_args(target_parser: argparse.ArgumentParser) -> None:
+        target_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
+        target_parser.add_argument("--cosmos-root", type=Path, default=Path("/root/code/cosmos-transfer2.5"))
+        target_parser.add_argument(
+            "--cosmos-python",
+            type=Path,
+            default=Path("/root/code/cosmos-transfer2.5/.venv/bin/python"),
+        )
+        target_parser.add_argument(
+            "--prompt-path",
+            type=Path,
+            default=Path("/root/code/cosmos-transfer2.5/assets/robot_example/robot_prompt.txt"),
+        )
+        target_parser.add_argument("--guidance", type=int, default=3)
+        target_parser.add_argument("--cosmos-model", default="edge/distilled")
+        target_parser.add_argument(
+            "--hf-home",
+            type=Path,
+            default=Path("/file_system/liujincheng/models/cosmos_model_cache"),
+        )
+        target_parser.add_argument("--nproc-per-node", type=int, default=8)
+        target_parser.add_argument("--master-port", type=int, default=12341)
+        target_parser.add_argument(
+            "--disable-experimental-checkpoints",
+            action="store_true",
+            help="Do not set COSMOS_EXPERIMENTAL_CHECKPOINTS=1 for the inference subprocess.",
+        )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print dataset rows grouped by episode.")
     inspect_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
@@ -34,43 +63,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     infer_parser = subparsers.add_parser(
         "infer-episode",
-        help="Run Cosmos depth inference for every video in a processed episode directory.",
+        help="Run Cosmos inference for every video in a processed episode directory.",
     )
     infer_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
     infer_parser.add_argument("--episode-id", type=int, required=True)
-    infer_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
-    infer_parser.add_argument("--cosmos-root", type=Path, default=Path("/workspace/cosmos-transfer2.5"))
-    infer_parser.add_argument(
-        "--cosmos-python",
-        type=Path,
-        default=Path("/workspace/cosmos-transfer2.5/.venv/bin/python"),
-    )
-    infer_parser.add_argument(
-        "--prompt-path",
-        type=Path,
-        default=Path("/workspace/cosmos-transfer2.5/assets/robot_example/robot_prompt.txt"),
-    )
-    infer_parser.add_argument("--guidance", type=int, default=3)
+    add_cosmos_args(infer_parser)
 
     run_parser = subparsers.add_parser(
         "run",
-        help="One-command entrypoint for running Cosmos depth inference on a prepared episode.",
+        help="One-command entrypoint for running Cosmos inference on a prepared episode.",
     )
     run_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
     run_parser.add_argument("--episode-id", type=int, required=True)
-    run_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
-    run_parser.add_argument("--cosmos-root", type=Path, default=Path("/workspace/cosmos-transfer2.5"))
-    run_parser.add_argument(
-        "--cosmos-python",
-        type=Path,
-        default=Path("/workspace/cosmos-transfer2.5/.venv/bin/python"),
+    add_cosmos_args(run_parser)
+
+    run_all_parser = subparsers.add_parser(
+        "run-all",
+        help="Run Cosmos inference for every prepared episode in the dataset export directory.",
     )
-    run_parser.add_argument(
-        "--prompt-path",
-        type=Path,
-        default=Path("/workspace/cosmos-transfer2.5/assets/robot_example/robot_prompt.txt"),
-    )
-    run_parser.add_argument("--guidance", type=int, default=3)
+    run_all_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
+    add_cosmos_args(run_all_parser)
 
     append_parser = subparsers.add_parser(
         "append-episode",
@@ -81,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     append_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
     append_parser.add_argument("--raw-dir", type=Path, default=Path("data/hf_raw"))
     append_parser.add_argument("--target-dir", type=Path, default=Path("data/augmented_datasets"))
+    append_parser.add_argument("--cosmos-model", default="edge/distilled")
 
     append_upload_parser = subparsers.add_parser(
         "append-and-upload",
@@ -93,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     append_upload_parser.add_argument("--target-dir", type=Path, default=Path("data/augmented_datasets"))
     append_upload_parser.add_argument("--hf-repo", default=None)
     append_upload_parser.add_argument("--hf-token-env", default="HF_TOKEN")
+    append_upload_parser.add_argument("--cosmos-model", default="edge/distilled")
 
     return parser
 
@@ -129,6 +143,11 @@ def main() -> None:
             cosmos_python=args.cosmos_python,
             cosmos_prompt_path=args.prompt_path,
             guidance=args.guidance,
+            cosmos_model=args.cosmos_model,
+            hf_home=args.hf_home,
+            cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
+            nproc_per_node=args.nproc_per_node,
+            master_port=args.master_port,
         )
         print(f"Cosmos outputs saved under: {run_dir}")
         return
@@ -142,8 +161,30 @@ def main() -> None:
             cosmos_python=args.cosmos_python,
             cosmos_prompt_path=args.prompt_path,
             guidance=args.guidance,
+            cosmos_model=args.cosmos_model,
+            hf_home=args.hf_home,
+            cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
+            nproc_per_node=args.nproc_per_node,
+            master_port=args.master_port,
         )
         print(f"Cosmos outputs saved under: {run_dir}")
+        return
+
+    if command == "run-all":
+        run_dirs = run_cosmos_depth_inference_for_all_episodes(
+            dataset_id=args.dataset,
+            export_dir=args.export_dir,
+            cosmos_root=args.cosmos_root,
+            cosmos_python=args.cosmos_python,
+            cosmos_prompt_path=args.prompt_path,
+            guidance=args.guidance,
+            cosmos_model=args.cosmos_model,
+            hf_home=args.hf_home,
+            cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
+            nproc_per_node=args.nproc_per_node,
+            master_port=args.master_port,
+        )
+        print(f"Completed {len(run_dirs)} episode runs.")
         return
 
     if command == "append-episode":
@@ -153,6 +194,7 @@ def main() -> None:
             export_dir=args.export_dir,
             raw_dir=args.raw_dir,
             augmented_root=args.target_dir,
+            cosmos_model=args.cosmos_model,
         )
         print(f"Augmented dataset saved under: {target_dir}")
         return
@@ -167,6 +209,7 @@ def main() -> None:
             augmented_root=args.target_dir,
             hf_repo_id=hf_repo,
             hf_token_env_var=args.hf_token_env,
+            cosmos_model=args.cosmos_model,
         )
         print(f"Augmented dataset saved under: {target_dir}")
         print(f"Uploaded to Hugging Face dataset repo: {hf_repo}")
