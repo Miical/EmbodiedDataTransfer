@@ -11,6 +11,7 @@ dist/
 *.egg-info/
 .DS_Store
 data/hf_raw/
+data/hf_home/
 data/huggingface/
 data/episode_exports/
 data/augmented_datasets/

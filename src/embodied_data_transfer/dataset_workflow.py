@@ -8,9 +8,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import imageio.v3 as iio
+import numpy as np
 import pandas as pd
 from datasets import load_dataset
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi, hf_hub_download, snapshot_download
+from lerobot.datasets import LeRobotDataset
 
 
 def to_serializable(value: Any) -> Any:
@@ -431,11 +434,31 @@ def write_json_file(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def has_complete_dataset_snapshot(root: Path) -> bool:
+    return (
+        (root / "meta" / "info.json").exists()
+        and (root / "meta" / "stats.json").exists()
+        and (root / "meta" / "tasks.parquet").exists()
+        and any((root / "data").rglob("file-*.parquet"))
+        and any((root / "videos").rglob("file-*.mp4"))
+    )
+
+
 def initialize_augmented_dataset(raw_dir: Path, dataset_id: str, augmented_root: Path) -> Path:
     target_dir = augmented_root / augmented_dataset_dir_name(dataset_id)
-    if target_dir.exists():
+    if target_dir.exists() and has_complete_dataset_snapshot(target_dir):
         return target_dir
-    shutil.copytree(raw_dir, target_dir, ignore=shutil.ignore_patterns(".cache"))
+
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+
+    snapshot_download(
+        repo_id=dataset_id,
+        repo_type="dataset",
+        local_dir=str(target_dir),
+        local_dir_use_symlinks=False,
+        ignore_patterns=[".cache/*"],
+    )
     download_root_repo_files(dataset_id, target_dir)
     return target_dir
 
@@ -467,6 +490,10 @@ def ffprobe_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip())
 
 
+def load_video_frames(path: Path) -> list[Any]:
+    return [frame for frame in iio.imiter(path)]
+
+
 def append_generated_episode_to_dataset(
     *,
     dataset_id: str,
@@ -487,93 +514,57 @@ def append_generated_episode_to_dataset(
     if any(item["source_episode_id"] == episode_id for item in manifest["appended"]):
         raise ValueError(f"Episode {episode_id} has already been appended to {target_dir}")
 
-    info_path = target_dir / "meta" / "info.json"
-    info = load_json_file(info_path)
-
-    new_episode_index = int(info["total_episodes"])
-    new_frame_start_index = int(info["total_frames"])
-
-    data_chunk_dir = target_dir / "data" / "chunk-000"
-    meta_chunk_dir = target_dir / "meta" / "episodes" / "chunk-000"
-    data_chunk_dir.mkdir(parents=True, exist_ok=True)
-    meta_chunk_dir.mkdir(parents=True, exist_ok=True)
-
-    data_file_index = next_file_index("file-*.parquet", data_chunk_dir)
-    meta_file_index = next_file_index("file-*.parquet", meta_chunk_dir)
-
     frames = load_json_file(source_episode_dir / "frames.json")
-    updated_frames: list[dict[str, Any]] = []
-    for offset, frame in enumerate(frames):
-        frame = dict(frame)
-        frame["episode_index"] = new_episode_index
-        frame["index"] = new_frame_start_index + offset
-        updated_frames.append(frame)
-
-    frame_df = pd.DataFrame(updated_frames)
-    data_file_path = data_chunk_dir / f"file-{data_file_index:03d}.parquet"
-    frame_df.to_parquet(data_file_path, index=False)
-
     source_episode_meta = load_json_file(source_episode_dir / "episode_meta.json")
-    new_episode_meta = dict(source_episode_meta)
-    new_episode_meta["episode_index"] = new_episode_index
-    new_episode_meta["data/chunk_index"] = 0
-    new_episode_meta["data/file_index"] = data_file_index
-    new_episode_meta["dataset_from_index"] = new_frame_start_index
-    new_episode_meta["dataset_to_index"] = new_frame_start_index + len(updated_frames)
+    task = source_episode_meta["tasks"][0]
 
-    video_keys = [key for key, spec in info["features"].items() if spec.get("dtype") == "video"]
+    dataset = LeRobotDataset.resume(dataset_id, root=target_dir)
+    new_episode_index = dataset.num_episodes
+    video_keys = list(dataset.meta.video_keys)
+    video_frames: dict[str, list[Any]] = {}
     for video_key in video_keys:
         source_video = generated_dir / f"{video_key}_generated.mp4"
         if not source_video.exists():
             raise FileNotFoundError(f"Generated video missing for {video_key}: {source_video}")
-        target_video_dir = target_dir / "videos" / video_key / "chunk-000"
-        target_video_dir.mkdir(parents=True, exist_ok=True)
-        video_file_index = next_file_index("file-*.mp4", target_video_dir)
-        target_video = target_video_dir / f"file-{video_file_index:03d}.mp4"
-        shutil.copy2(source_video, target_video)
+        video_frames[video_key] = load_video_frames(source_video)
+        if len(video_frames[video_key]) != len(frames):
+            raise ValueError(
+                f"Frame count mismatch for {video_key}: "
+                f"{len(video_frames[video_key])} video frames vs {len(frames)} metadata frames"
+            )
 
-        duration = ffprobe_duration_seconds(target_video)
-        new_episode_meta[f"videos/{video_key}/chunk_index"] = 0
-        new_episode_meta[f"videos/{video_key}/file_index"] = video_file_index
-        new_episode_meta[f"videos/{video_key}/from_timestamp"] = 0.0
-        new_episode_meta[f"videos/{video_key}/to_timestamp"] = duration
+    for frame_index, frame in enumerate(frames):
+        frame_payload = {
+            "action": np.asarray(frame["action"], dtype=np.float32),
+            "observation.state": np.asarray(frame["observation.state"], dtype=np.float32),
+            "task": task,
+        }
+        for video_key in video_keys:
+            frame_payload[video_key] = video_frames[video_key][frame_index]
+        dataset.add_frame(frame_payload)
 
-    meta_file_path = meta_chunk_dir / f"file-{meta_file_index:03d}.parquet"
-    pd.DataFrame([new_episode_meta]).to_parquet(meta_file_path, index=False)
-
-    info["total_episodes"] = new_episode_index + 1
-    info["total_frames"] = new_frame_start_index + len(updated_frames)
-    info["splits"]["train"] = f"0:{info['total_episodes']}"
-    info["data_files_size_in_mb"] = directory_size_mb(target_dir / "data")
-    info["video_files_size_in_mb"] = directory_size_mb(target_dir / "videos")
-    write_json_file(info_path, info)
+    dataset.save_episode()
+    dataset.finalize()
 
     manifest["appended"].append(
         {
             "source_episode_id": episode_id,
             "new_episode_index": new_episode_index,
-            "data_file": str(data_file_path.relative_to(target_dir)),
-            "meta_file": str(meta_file_path.relative_to(target_dir)),
         }
     )
     write_json_file(manifest_path, manifest)
 
     print(f"Appended source episode {episode_id} as episode {new_episode_index}")
     print(f"Target dataset: {target_dir}")
-    print(f"Frames written: {len(updated_frames)}")
+    print(f"Frames written: {len(frames)}")
     return target_dir
 
 
 def upload_dataset_to_hf(target_dir: Path, repo_id: str, token: str, message: str) -> str:
-    api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
-    return api.upload_folder(
-        repo_id=repo_id,
-        repo_type="dataset",
-        folder_path=str(target_dir),
-        commit_message=message,
-        ignore_patterns=[".cache/*"],
-    )
+    os.environ["HF_TOKEN"] = token
+    dataset = LeRobotDataset(repo_id=repo_id, root=target_dir, download_videos=False)
+    dataset.push_to_hub()
+    return f"https://huggingface.co/datasets/{repo_id}"
 
 
 def append_generated_episode_and_upload(
