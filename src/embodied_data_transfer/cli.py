@@ -101,14 +101,6 @@ def build_parser() -> argparse.ArgumentParser:
     process_parser.add_argument("--raw-dir", type=Path, default=Path("data/hf_raw"))
     process_parser.add_argument("--export-dir", type=Path, default=Path("data/episode_exports"))
 
-    infer_parser = subparsers.add_parser(
-        "infer-episode",
-        help="Run Cosmos inference for every video in a processed episode directory.",
-    )
-    infer_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
-    infer_parser.add_argument("--episode-id", type=int, required=True)
-    add_cosmos_args(infer_parser)
-
     run_parser = subparsers.add_parser(
         "run",
         help="Run Cosmos inference for one episode or all exported episodes, with optional data parallel scheduling.",
@@ -182,28 +174,6 @@ def main() -> None:
             raw_dir=args.raw_dir,
             export_dir=args.export_dir,
         )
-        return
-
-    if command == "infer-episode":
-        run_dir = run_cosmos_depth_inference_for_episode(
-            dataset_id=args.dataset,
-            episode_id=args.episode_id,
-            export_dir=args.export_dir,
-            cosmos_root=args.cosmos_root,
-            cosmos_python=args.cosmos_python,
-            cosmos_prompt_path=args.prompt_path,
-            guidance=args.guidance,
-            cosmos_model=args.cosmos_model,
-            num_steps=args.num_steps,
-            seed=args.seed,
-            num_trajectories=args.num_trajectories,
-            disable_guardrails=args.disable_guardrails,
-            hf_home=args.hf_home,
-            cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
-            nproc_per_node=args.nproc_per_node,
-            master_port=args.master_port,
-        )
-        print(f"Cosmos outputs saved under: {run_dir}")
         return
 
     if command == "run":

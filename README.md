@@ -199,7 +199,6 @@ If you want to bypass the shell scripts, the Python CLI exposes these commands:
 
 - `inspect`
 - `process`
-- `infer-episode`
 - `run`
 - `append`
 
@@ -227,25 +226,6 @@ PYTHONPATH=src python3 -m embodied_data_transfer process \
   --cache-dir data/huggingface \
   --raw-dir data/hf_raw \
   --export-dir data/episode_exports
-```
-
-### `infer-episode`
-
-Legacy single-episode entrypoint. It still works, but in practice `run` is the more general interface.
-
-```bash
-PYTHONPATH=src python3 -m embodied_data_transfer infer-episode \
-  Miical/so101-30episodes \
-  --episode-id 3 \
-  --export-dir data/episode_exports \
-  --cosmos-root /root/code/cosmos-transfer2.5 \
-  --cosmos-python /root/code/cosmos-transfer2.5/.venv/bin/python \
-  --prompt-path /file_system/liujincheng/Projects/EmbodiedDataTransfer/prompts/single_arm_scene_tuning_en.txt \
-  --hf-home /file_system/liujincheng/models/cosmos_model_cache \
-  --cosmos-model edge/distilled \
-  --num-steps 4 \
-  --seed 1 \
-  --num-trajectories 4
 ```
 
 ### `run`
