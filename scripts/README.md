@@ -14,15 +14,21 @@ DATA_PARALLEL=true NUM_TRAJECTORIES=4 GPU_IDS=0,1,2,3,4,5,6,7 UPLOAD=true HF_TOK
 
 All scripts read environment variables from `scripts/common.sh`. You can override them inline.
 
+Before running them, set the Cosmos paths for your own machine instead of assuming the example defaults.
+
 Common overrides:
 
 ```bash
 DATASET_ID=Miical/so101-30episodes
+COSMOS_ROOT=/path/to/cosmos-transfer2.5
+COSMOS_PYTHON=/path/to/cosmos-transfer2.5/.venv/bin/python
 PROMPT_PATH=/file_system/liujincheng/Projects/EmbodiedDataTransfer/prompts/single_arm_scene_tuning_en.txt
 HF_HOME=/file_system/liujincheng/models/cosmos_model_cache
 NUM_TRAJECTORIES=4
 GPU_IDS=0,1,2,3,4,5,6,7
 ```
+
+`COSMOS_ROOT` points to the Cosmos repository, and `COSMOS_PYTHON` points to the Python executable used to run `examples/inference.py`.
 
 ## Full Pipeline
 
