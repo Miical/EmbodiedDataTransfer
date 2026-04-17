@@ -59,11 +59,24 @@ EmbodiedDataTransfer/
 │   └── embodied_data_transfer/
 │       ├── __main__.py
 │       ├── cli.py
+│       ├── common.py
+│       ├── dataset_processing.py
+│       ├── cosmos_workflow.py
+│       ├── augmentation.py
 │       └── dataset_workflow.py
 ├── tests/
 ├── pyproject.toml
 └── README.md
 ```
+
+## Code Structure
+
+- [cli.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cli.py): command-line entrypoints and argument parsing
+- [common.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/common.py): shared path, naming, and metadata helpers
+- [dataset_processing.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/dataset_processing.py): dataset download, inspection, and episode export
+- [cosmos_workflow.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cosmos_workflow.py): Cosmos spec generation, single-run execution, and data-parallel scheduling
+- [augmentation.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/augmentation.py): appending generated trajectories into LeRobot datasets and optional upload
+- [dataset_workflow.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/dataset_workflow.py): compatibility facade that re-exports the main workflow functions
 
 ## Script Usage
 
@@ -202,7 +215,7 @@ If you want to bypass the shell scripts, the Python CLI exposes these commands:
 - `run`
 - `append`
 
-All commands are implemented in [cli.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cli.py).
+The CLI entrypoints live in [cli.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cli.py), while the workflow logic is split across the modules listed above.
 
 ### `inspect`
 
@@ -344,4 +357,7 @@ PYTHONPATH=src python3 -m embodied_data_transfer append \
 - high-level script examples: [scripts/README.md](/file_system/liujincheng/Projects/EmbodiedDataTransfer/scripts/README.md)
 - prompt templates: [prompts/README.md](/file_system/liujincheng/Projects/EmbodiedDataTransfer/prompts/README.md)
 - CLI implementation: [cli.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cli.py)
-- workflow implementation: [dataset_workflow.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/dataset_workflow.py)
+- dataset download and export: [dataset_processing.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/dataset_processing.py)
+- Cosmos generation workflow: [cosmos_workflow.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/cosmos_workflow.py)
+- dataset append and upload: [augmentation.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/augmentation.py)
+- compatibility re-exports: [dataset_workflow.py](/file_system/liujincheng/Projects/EmbodiedDataTransfer/src/embodied_data_transfer/dataset_workflow.py)
