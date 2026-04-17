@@ -8,4 +8,4 @@ EPISODE_ID="${1:-all}"
 
 "${SCRIPT_DIR}/process_dataset.sh"
 EPISODE_ID="${EPISODE_ID}" "${SCRIPT_DIR}/run.sh"
-EPISODE_ID="${EPISODE_ID}" "${SCRIPT_DIR}/append.sh"
+EPISODE_ID="${EPISODE_ID}" UPLOAD="${UPLOAD:-false}" "${SCRIPT_DIR}/append.sh"
