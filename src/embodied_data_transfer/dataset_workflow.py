@@ -366,6 +366,7 @@ def build_cosmos_inference_command(
     output_dir: Path,
     nproc_per_node: int,
     master_port: int,
+    disable_guardrails: bool = False,
 ) -> list[str]:
     if nproc_per_node <= 1:
         cmd = [
@@ -388,6 +389,8 @@ def build_cosmos_inference_command(
             "-i",
         ]
     cmd.extend(str(path) for path in spec_paths)
+    if disable_guardrails:
+        cmd.append("--disable-guardrails")
     cmd.extend(["-o", str(output_dir.resolve())])
     return cmd
 
@@ -416,10 +419,18 @@ def collect_generated_videos(
     generated_dir: Path,
 ) -> None:
     generated_dir.mkdir(parents=True, exist_ok=True)
+    debug_log_path = batch_output_dir / "debug.log"
+    debug_log_text = debug_log_path.read_text(encoding="utf-8", errors="ignore") if debug_log_path.exists() else ""
     for video_stem, _ in jobs:
         job_name = f"episode_{episode_id:03d}_{video_stem}_edge"
         generated_video = batch_output_dir / f"{job_name}.mp4"
         if not generated_video.exists():
+            if "GUARDRAIL BLOCKED" in debug_log_text:
+                raise RuntimeError(
+                    "Cosmos guardrails blocked the generated video, so the final output mp4 was not saved. "
+                    f"Missing file: {generated_video}. "
+                    "You can retry with guardrails disabled in this workflow."
+                )
             raise FileNotFoundError(f"Expected generated video not found: {generated_video}")
         shutil.copy2(generated_video, generated_dir / f"{video_stem}_generated.mp4")
 
@@ -437,6 +448,7 @@ def run_cosmos_depth_inference_for_episode(
     num_steps: int | None = None,
     seed: int = 1,
     num_trajectories: int = 1,
+    disable_guardrails: bool = False,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     nproc_per_node: int = 8,
@@ -466,6 +478,7 @@ def run_cosmos_depth_inference_for_episode(
             output_dir=batch_output_dir,
             nproc_per_node=nproc_per_node,
             master_port=master_port + variant_index,
+            disable_guardrails=disable_guardrails,
         )
         env = build_cosmos_inference_env(
             hf_home=hf_home,
@@ -497,6 +510,7 @@ def run_cosmos_depth_inference_parallel_single_gpu(
     num_steps: int | None = None,
     seed: int = 1,
     num_trajectories: int = 1,
+    disable_guardrails: bool = False,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     master_port_start: int = 12341,
@@ -548,6 +562,7 @@ def run_cosmos_depth_inference_parallel_single_gpu(
                 output_dir=batch_output_dir,
                 nproc_per_node=1,
                 master_port=master_port,
+                disable_guardrails=disable_guardrails,
             )
             env = build_cosmos_inference_env(
                 hf_home=hf_home,
@@ -660,6 +675,7 @@ def run_cosmos_depth_inference_for_all_episodes(
     num_steps: int | None = None,
     seed: int = 1,
     num_trajectories: int = 1,
+    disable_guardrails: bool = False,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     nproc_per_node: int = 8,
@@ -686,6 +702,7 @@ def run_cosmos_depth_inference_for_all_episodes(
             num_steps=num_steps,
             seed=seed,
             num_trajectories=num_trajectories,
+            disable_guardrails=disable_guardrails,
             hf_home=hf_home,
             cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
             nproc_per_node=nproc_per_node,

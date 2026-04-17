@@ -72,6 +72,19 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Do not set COSMOS_EXPERIMENTAL_CHECKPOINTS=1 for the inference subprocess.",
         )
+        target_parser.add_argument(
+            "--disable-guardrails",
+            dest="disable_guardrails",
+            action="store_true",
+            default=True,
+            help="Disable Cosmos prompt/video guardrails. This is the default behavior in this workflow.",
+        )
+        target_parser.add_argument(
+            "--enable-guardrails",
+            dest="disable_guardrails",
+            action="store_false",
+            help="Enable Cosmos prompt/video guardrails.",
+        )
 
     inspect_parser = subparsers.add_parser("inspect", help="Print dataset rows grouped by episode.")
     inspect_parser.add_argument("dataset", nargs="?", default="Miical/record-test-2")
@@ -184,6 +197,7 @@ def main() -> None:
             num_steps=args.num_steps,
             seed=args.seed,
             num_trajectories=args.num_trajectories,
+            disable_guardrails=args.disable_guardrails,
             hf_home=args.hf_home,
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             nproc_per_node=args.nproc_per_node,
@@ -211,6 +225,7 @@ def main() -> None:
                 num_steps=args.num_steps,
                 seed=args.seed,
                 num_trajectories=args.num_trajectories,
+                disable_guardrails=args.disable_guardrails,
                 hf_home=args.hf_home,
                 cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
                 master_port_start=args.master_port,
@@ -232,6 +247,7 @@ def main() -> None:
                 num_steps=args.num_steps,
                 seed=args.seed,
                 num_trajectories=args.num_trajectories,
+                disable_guardrails=args.disable_guardrails,
                 hf_home=args.hf_home,
                 cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
                 nproc_per_node=args.nproc_per_node,

@@ -30,4 +30,8 @@ else
   ARGS+=(--nproc-per-node "${NPROC_PER_NODE}")
 fi
 
+if [[ "${DISABLE_GUARDRAILS}" == "true" ]]; then
+  ARGS+=(--disable-guardrails)
+fi
+
 run_edt "${ARGS[@]}"
