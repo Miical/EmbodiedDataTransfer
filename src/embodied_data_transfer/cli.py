@@ -39,6 +39,19 @@ def build_parser() -> argparse.ArgumentParser:
         target_parser.add_argument("--guidance", type=int, default=3)
         target_parser.add_argument("--cosmos-model", default="edge/distilled")
         target_parser.add_argument(
+            "--num-steps",
+            type=int,
+            default=None,
+            help="Sampling steps written into each Cosmos spec. Defaults to 4 for distilled models and 35 otherwise.",
+        )
+        target_parser.add_argument("--seed", type=int, default=1)
+        target_parser.add_argument(
+            "--num-trajectories",
+            type=int,
+            default=1,
+            help="How many trajectory variants to generate per source episode. Each variant uses seed+index.",
+        )
+        target_parser.add_argument(
             "--hf-home",
             type=Path,
             default=Path("/file_system/liujincheng/models/cosmos_model_cache"),
@@ -174,6 +187,9 @@ def main() -> None:
             cosmos_prompt_path=args.prompt_path,
             guidance=args.guidance,
             cosmos_model=args.cosmos_model,
+            num_steps=args.num_steps,
+            seed=args.seed,
+            num_trajectories=args.num_trajectories,
             hf_home=args.hf_home,
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             nproc_per_node=args.nproc_per_node,
@@ -192,6 +208,9 @@ def main() -> None:
             cosmos_prompt_path=args.prompt_path,
             guidance=args.guidance,
             cosmos_model=args.cosmos_model,
+            num_steps=args.num_steps,
+            seed=args.seed,
+            num_trajectories=args.num_trajectories,
             hf_home=args.hf_home,
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             nproc_per_node=args.nproc_per_node,
@@ -209,6 +228,9 @@ def main() -> None:
             cosmos_prompt_path=args.prompt_path,
             guidance=args.guidance,
             cosmos_model=args.cosmos_model,
+            num_steps=args.num_steps,
+            seed=args.seed,
+            num_trajectories=args.num_trajectories,
             hf_home=args.hf_home,
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             nproc_per_node=args.nproc_per_node,
@@ -227,6 +249,9 @@ def main() -> None:
             gpu_ids=args.gpu_ids,
             guidance=args.guidance,
             cosmos_model=args.cosmos_model,
+            num_steps=args.num_steps,
+            seed=args.seed,
+            num_trajectories=args.num_trajectories,
             hf_home=args.hf_home,
             cosmos_experimental_checkpoints=not args.disable_experimental_checkpoints,
             master_port_start=args.master_port,

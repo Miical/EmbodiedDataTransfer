@@ -263,12 +263,16 @@ def build_cosmos_edge_spec(
     prompt_path: Path,
     spec_path: Path,
     guidance: int,
+    num_steps: int,
+    seed: int,
 ) -> Path:
     spec = {
         "name": name,
         "prompt_path": str(prompt_path),
         "video_path": str(video_path),
         "guidance": guidance,
+        "num_steps": num_steps,
+        "seed": seed,
         "edge": {
             "control_weight": 1.0,
         },
@@ -282,6 +286,18 @@ def cosmos_run_dir_name(cosmos_model: str) -> str:
     return f"cosmos_{cosmos_model.replace('/', '_')}"
 
 
+def default_num_steps_for_model(cosmos_model: str) -> int:
+    return 4 if "distilled" in cosmos_model else 35
+
+
+def variant_dir_name(variant_index: int) -> str:
+    return f"variant_{variant_index:03d}"
+
+
+def variant_seed(base_seed: int, variant_index: int) -> int:
+    return base_seed + variant_index
+
+
 def prepare_cosmos_edge_jobs(
     *,
     dataset_id: str,
@@ -290,21 +306,27 @@ def prepare_cosmos_edge_jobs(
     cosmos_prompt_path: Path,
     guidance: int,
     cosmos_model: str,
-) -> tuple[Path, Path, list[tuple[str, Path]]]:
+    num_steps: int | None,
+    seed: int,
+    variant_index: int,
+) -> tuple[Path, Path, Path, list[tuple[str, Path]]]:
     episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
     input_videos = sorted(episode_dir.glob("*.mp4"))
     if not input_videos:
         raise FileNotFoundError(f"No input videos found in {episode_dir}")
 
     cosmos_run_dir = episode_dir / cosmos_run_dir_name(cosmos_model)
-    specs_dir = cosmos_run_dir / "specs"
-    outputs_dir = cosmos_run_dir / "outputs"
+    variant_dir = cosmos_run_dir / "variants" / variant_dir_name(variant_index)
+    specs_dir = variant_dir / "specs"
+    outputs_dir = variant_dir / "outputs"
     batch_output_dir = outputs_dir / "batch"
-    generated_dir = cosmos_run_dir / "generated"
+    generated_dir = variant_dir / "generated"
     specs_dir.mkdir(parents=True, exist_ok=True)
     outputs_dir.mkdir(parents=True, exist_ok=True)
     batch_output_dir.mkdir(parents=True, exist_ok=True)
     generated_dir.mkdir(parents=True, exist_ok=True)
+
+    resolved_num_steps = num_steps if num_steps is not None else default_num_steps_for_model(cosmos_model)
 
     jobs: list[tuple[str, Path]] = []
     for video_path in input_videos:
@@ -316,10 +338,24 @@ def prepare_cosmos_edge_jobs(
             prompt_path=cosmos_prompt_path.resolve(),
             spec_path=specs_dir / f"{job_name}.json",
             guidance=guidance,
+            num_steps=resolved_num_steps,
+            seed=seed,
         )
         jobs.append((video_stem, spec_path.resolve()))
 
-    return cosmos_run_dir, batch_output_dir, jobs
+    write_json_file(
+        variant_dir / "run_meta.json",
+        {
+            "episode_id": episode_id,
+            "variant_index": variant_index,
+            "seed": seed,
+            "num_steps": resolved_num_steps,
+            "guidance": guidance,
+            "cosmos_model": cosmos_model,
+        },
+    )
+
+    return cosmos_run_dir, variant_dir, batch_output_dir, jobs
 
 
 def build_cosmos_inference_command(
@@ -398,40 +434,52 @@ def run_cosmos_depth_inference_for_episode(
     cosmos_prompt_path: Path,
     guidance: int = 3,
     cosmos_model: str = "edge/distilled",
+    num_steps: int | None = None,
+    seed: int = 1,
+    num_trajectories: int = 1,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     nproc_per_node: int = 8,
     master_port: int = 12341,
 ) -> Path:
-    cosmos_run_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
-        dataset_id=dataset_id,
-        episode_id=episode_id,
-        export_dir=export_dir,
-        cosmos_prompt_path=cosmos_prompt_path,
-        guidance=guidance,
-        cosmos_model=cosmos_model,
-    )
-    cmd = build_cosmos_inference_command(
-        cosmos_python=cosmos_python,
-        cosmos_model=cosmos_model,
-        spec_paths=[spec_path for _, spec_path in jobs],
-        output_dir=batch_output_dir,
-        nproc_per_node=nproc_per_node,
-        master_port=master_port,
-    )
-    env = build_cosmos_inference_env(
-        hf_home=hf_home,
-        cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
-    )
+    if num_trajectories <= 0:
+        raise ValueError("num_trajectories must be positive")
 
-    subprocess.run(cmd, check=True, cwd=str(cosmos_root), env=env)
+    cosmos_run_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id) / cosmos_run_dir_name(cosmos_model)
+    for variant_index in range(num_trajectories):
+        current_seed = variant_seed(seed, variant_index)
+        _, variant_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
+            dataset_id=dataset_id,
+            episode_id=episode_id,
+            export_dir=export_dir,
+            cosmos_prompt_path=cosmos_prompt_path,
+            guidance=guidance,
+            cosmos_model=cosmos_model,
+            num_steps=num_steps,
+            seed=current_seed,
+            variant_index=variant_index,
+        )
+        cmd = build_cosmos_inference_command(
+            cosmos_python=cosmos_python,
+            cosmos_model=cosmos_model,
+            spec_paths=[spec_path for _, spec_path in jobs],
+            output_dir=batch_output_dir,
+            nproc_per_node=nproc_per_node,
+            master_port=master_port + variant_index,
+        )
+        env = build_cosmos_inference_env(
+            hf_home=hf_home,
+            cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
+        )
 
-    collect_generated_videos(
-        episode_id=episode_id,
-        jobs=jobs,
-        batch_output_dir=batch_output_dir,
-        generated_dir=cosmos_run_dir / "generated",
-    )
+        subprocess.run(cmd, check=True, cwd=str(cosmos_root), env=env)
+
+        collect_generated_videos(
+            episode_id=episode_id,
+            jobs=jobs,
+            batch_output_dir=batch_output_dir,
+            generated_dir=variant_dir / "generated",
+        )
 
     return cosmos_run_dir
 
@@ -446,6 +494,9 @@ def run_cosmos_depth_inference_parallel_single_gpu(
     gpu_ids: list[int],
     guidance: int = 3,
     cosmos_model: str = "edge/distilled",
+    num_steps: int | None = None,
+    seed: int = 1,
+    num_trajectories: int = 1,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     master_port_start: int = 12341,
@@ -457,28 +508,38 @@ def run_cosmos_depth_inference_parallel_single_gpu(
         raise ValueError(f"No episode directories found for dataset {dataset_id}")
     if not gpu_ids:
         raise ValueError("At least one GPU id is required for parallel single-GPU scheduling")
+    if num_trajectories <= 0:
+        raise ValueError("num_trajectories must be positive")
 
-    pending_episode_ids = list(selected_episode_ids)
+    pending_jobs = [
+        (episode_id, variant_index)
+        for episode_id in selected_episode_ids
+        for variant_index in range(num_trajectories)
+    ]
     available_gpu_ids = list(gpu_ids)
     active_jobs: dict[int, dict[str, Any]] = {}
     completed_run_dirs: list[Path] = []
-    failures: list[tuple[int, int]] = []
+    failures: list[tuple[int, int, int]] = []
     worker_offset = 0
 
-    while pending_episode_ids or active_jobs:
-        while pending_episode_ids and available_gpu_ids:
-            episode_id = pending_episode_ids.pop(0)
+    while pending_jobs or active_jobs:
+        while pending_jobs and available_gpu_ids:
+            episode_id, variant_index = pending_jobs.pop(0)
             gpu_id = available_gpu_ids.pop(0)
             master_port = master_port_start + worker_offset
             worker_offset += 1
+            current_seed = variant_seed(seed, variant_index)
 
-            cosmos_run_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
+            cosmos_run_dir, variant_dir, batch_output_dir, jobs = prepare_cosmos_edge_jobs(
                 dataset_id=dataset_id,
                 episode_id=episode_id,
                 export_dir=export_dir,
                 cosmos_prompt_path=cosmos_prompt_path,
                 guidance=guidance,
                 cosmos_model=cosmos_model,
+                num_steps=num_steps,
+                seed=current_seed,
+                variant_index=variant_index,
             )
             cmd = build_cosmos_inference_command(
                 cosmos_python=cosmos_python,
@@ -493,7 +554,7 @@ def run_cosmos_depth_inference_parallel_single_gpu(
                 cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
                 gpu_id=gpu_id,
             )
-            log_path = cosmos_run_dir / "outputs" / f"worker_gpu{gpu_id}.log"
+            log_path = variant_dir / "outputs" / f"worker_gpu{gpu_id}.log"
             log_handle = log_path.open("w", encoding="utf-8")
             process = subprocess.Popen(
                 cmd,
@@ -507,14 +568,17 @@ def run_cosmos_depth_inference_parallel_single_gpu(
                 "process": process,
                 "gpu_id": gpu_id,
                 "episode_id": episode_id,
+                "variant_index": variant_index,
+                "seed": current_seed,
                 "cosmos_run_dir": cosmos_run_dir,
+                "variant_dir": variant_dir,
                 "batch_output_dir": batch_output_dir,
                 "jobs": jobs,
                 "log_handle": log_handle,
                 "log_path": log_path,
             }
             print(
-                f"Started episode {episode_id} on GPU {gpu_id} "
+                f"Started episode {episode_id} variant {variant_index} seed {current_seed} on GPU {gpu_id} "
                 f"(pid={process.pid}, log={log_path})"
             )
 
@@ -537,17 +601,19 @@ def run_cosmos_depth_inference_parallel_single_gpu(
                     episode_id=job["episode_id"],
                     jobs=job["jobs"],
                     batch_output_dir=job["batch_output_dir"],
-                    generated_dir=job["cosmos_run_dir"] / "generated",
+                    generated_dir=job["variant_dir"] / "generated",
                 )
-                completed_run_dirs.append(job["cosmos_run_dir"])
+                completed_run_dirs.append(job["variant_dir"])
                 print(
-                    f"Finished episode {job['episode_id']} on GPU {job['gpu_id']} "
+                    f"Finished episode {job['episode_id']} variant {job['variant_index']} "
+                    f"seed {job['seed']} on GPU {job['gpu_id']} "
                     f"(log={job['log_path']})"
                 )
             else:
-                failures.append((job["episode_id"], return_code))
+                failures.append((job["episode_id"], job["variant_index"], return_code))
                 print(
-                    f"Episode {job['episode_id']} failed on GPU {job['gpu_id']} "
+                    f"Episode {job['episode_id']} variant {job['variant_index']} "
+                    f"failed on GPU {job['gpu_id']} "
                     f"with exit code {return_code} (log={job['log_path']})"
                 )
 
@@ -559,7 +625,10 @@ def run_cosmos_depth_inference_parallel_single_gpu(
             time.sleep(poll_interval_seconds)
 
     if failures:
-        failure_summary = ", ".join(f"episode {episode_id} (exit {code})" for episode_id, code in failures)
+        failure_summary = ", ".join(
+            f"episode {episode_id} variant {variant_index} (exit {code})"
+            for episode_id, variant_index, code in failures
+        )
         raise RuntimeError(f"Parallel Cosmos inference failed for {failure_summary}")
 
     return completed_run_dirs
@@ -588,6 +657,9 @@ def run_cosmos_depth_inference_for_all_episodes(
     cosmos_prompt_path: Path,
     guidance: int = 3,
     cosmos_model: str = "edge/distilled",
+    num_steps: int | None = None,
+    seed: int = 1,
+    num_trajectories: int = 1,
     hf_home: Path | None = None,
     cosmos_experimental_checkpoints: bool = True,
     nproc_per_node: int = 8,
@@ -611,6 +683,9 @@ def run_cosmos_depth_inference_for_all_episodes(
             cosmos_prompt_path=cosmos_prompt_path,
             guidance=guidance,
             cosmos_model=cosmos_model,
+            num_steps=num_steps,
+            seed=seed,
+            num_trajectories=num_trajectories,
             hf_home=hf_home,
             cosmos_experimental_checkpoints=cosmos_experimental_checkpoints,
             nproc_per_node=nproc_per_node,
@@ -702,6 +777,16 @@ def load_video_frames(path: Path) -> list[Any]:
     return [frame for frame in iio.imiter(path)]
 
 
+def list_generated_variant_dirs(source_episode_dir: Path, cosmos_model: str) -> list[Path]:
+    variants_root = source_episode_dir / cosmos_run_dir_name(cosmos_model) / "variants"
+    if not variants_root.exists():
+        raise FileNotFoundError(f"Generated variants directory not found: {variants_root}")
+    variant_dirs = sorted(path for path in variants_root.glob("variant_*") if path.is_dir())
+    if not variant_dirs:
+        raise FileNotFoundError(f"No generated variants found in {variants_root}")
+    return variant_dirs
+
+
 def append_generated_episode_to_dataset(
     *,
     dataset_id: str,
@@ -712,59 +797,81 @@ def append_generated_episode_to_dataset(
     cosmos_model: str = "edge/distilled",
 ) -> Path:
     source_episode_dir = find_episode_dir(export_dir=export_dir, dataset_id=dataset_id, episode_id=episode_id)
-    generated_dir = source_episode_dir / cosmos_run_dir_name(cosmos_model) / "generated"
-    if not generated_dir.exists():
-        raise FileNotFoundError(f"Generated video directory not found: {generated_dir}")
+    variant_dirs = list_generated_variant_dirs(source_episode_dir=source_episode_dir, cosmos_model=cosmos_model)
 
     target_dir = initialize_augmented_dataset(raw_dir=raw_dir, dataset_id=dataset_id, augmented_root=augmented_root)
     manifest_path = target_dir / "meta" / "augmentation_manifest.json"
     manifest = load_json_file(manifest_path) if manifest_path.exists() else {"source_dataset": dataset_id, "appended": []}
-    if any(item["source_episode_id"] == episode_id for item in manifest["appended"]):
-        raise ValueError(f"Episode {episode_id} has already been appended to {target_dir}")
 
     frames = load_json_file(source_episode_dir / "frames.json")
     source_episode_meta = load_json_file(source_episode_dir / "episode_meta.json")
     task = source_episode_meta["tasks"][0]
 
     dataset = LeRobotDataset.resume(dataset_id, root=target_dir)
-    new_episode_index = dataset.num_episodes
     video_keys = list(dataset.meta.video_keys)
-    video_frames: dict[str, list[Any]] = {}
-    for video_key in video_keys:
-        source_video = generated_dir / f"{video_key}_generated.mp4"
-        if not source_video.exists():
-            raise FileNotFoundError(f"Generated video missing for {video_key}: {source_video}")
-        video_frames[video_key] = load_video_frames(source_video)
-        if len(video_frames[video_key]) != len(frames):
+    appended_entries: list[dict[str, Any]] = []
+
+    for variant_dir in variant_dirs:
+        run_meta_path = variant_dir / "run_meta.json"
+        run_meta = load_json_file(run_meta_path) if run_meta_path.exists() else {}
+        variant_index = int(run_meta.get("variant_index", variant_dir.name.split("_")[-1]))
+        if any(
+            item["source_episode_id"] == episode_id and item["variant_index"] == variant_index
+            for item in manifest["appended"]
+        ):
             raise ValueError(
-                f"Frame count mismatch for {video_key}: "
-                f"{len(video_frames[video_key])} video frames vs {len(frames)} metadata frames"
+                f"Episode {episode_id} variant {variant_index} has already been appended to {target_dir}"
             )
 
-    for frame_index, frame in enumerate(frames):
-        frame_payload = {
-            "action": np.asarray(frame["action"], dtype=np.float32),
-            "observation.state": np.asarray(frame["observation.state"], dtype=np.float32),
-            "task": task,
-        }
-        for video_key in video_keys:
-            frame_payload[video_key] = video_frames[video_key][frame_index]
-        dataset.add_frame(frame_payload)
+        generated_dir = variant_dir / "generated"
+        if not generated_dir.exists():
+            raise FileNotFoundError(f"Generated video directory not found: {generated_dir}")
 
-    dataset.save_episode()
+        new_episode_index = dataset.num_episodes
+        video_frames: dict[str, list[Any]] = {}
+        for video_key in video_keys:
+            source_video = generated_dir / f"{video_key}_generated.mp4"
+            if not source_video.exists():
+                raise FileNotFoundError(f"Generated video missing for {video_key}: {source_video}")
+            video_frames[video_key] = load_video_frames(source_video)
+            if len(video_frames[video_key]) != len(frames):
+                raise ValueError(
+                    f"Frame count mismatch for {video_key}: "
+                    f"{len(video_frames[video_key])} video frames vs {len(frames)} metadata frames"
+                )
+
+        for frame_index, frame in enumerate(frames):
+            frame_payload = {
+                "action": np.asarray(frame["action"], dtype=np.float32),
+                "observation.state": np.asarray(frame["observation.state"], dtype=np.float32),
+                "task": task,
+            }
+            for video_key in video_keys:
+                frame_payload[video_key] = video_frames[video_key][frame_index]
+            dataset.add_frame(frame_payload)
+
+        dataset.save_episode()
+        appended_entries.append(
+            {
+                "source_episode_id": episode_id,
+                "variant_index": variant_index,
+                "seed": run_meta.get("seed"),
+                "new_episode_index": new_episode_index,
+            }
+        )
+        print(
+            f"Appended source episode {episode_id} variant {variant_index} "
+            f"as episode {new_episode_index}"
+        )
+
     dataset.finalize()
 
-    manifest["appended"].append(
-        {
-            "source_episode_id": episode_id,
-            "new_episode_index": new_episode_index,
-        }
-    )
+    manifest["appended"].extend(appended_entries)
     write_json_file(manifest_path, manifest)
 
-    print(f"Appended source episode {episode_id} as episode {new_episode_index}")
     print(f"Target dataset: {target_dir}")
-    print(f"Frames written: {len(frames)}")
+    print(f"Frames written per variant: {len(frames)}")
+    print(f"Variants appended: {len(appended_entries)}")
     return target_dir
 
 
