@@ -875,6 +875,37 @@ def append_generated_episode_to_dataset(
     return target_dir
 
 
+def append_all_generated_episodes_to_dataset(
+    *,
+    dataset_id: str,
+    export_dir: Path,
+    raw_dir: Path,
+    augmented_root: Path,
+    cosmos_model: str = "edge/distilled",
+    episode_ids: list[int] | None = None,
+) -> Path:
+    selected_episode_ids = episode_ids or list_available_episode_ids(export_dir=export_dir, dataset_id=dataset_id)
+    if not selected_episode_ids:
+        raise ValueError(f"No episode directories found for dataset {dataset_id}")
+
+    target_dir: Path | None = None
+    for episode_id in selected_episode_ids:
+        print("=" * 80)
+        print(f"Appending generated episode {episode_id}")
+        target_dir = append_generated_episode_to_dataset(
+            dataset_id=dataset_id,
+            episode_id=episode_id,
+            export_dir=export_dir,
+            raw_dir=raw_dir,
+            augmented_root=augmented_root,
+            cosmos_model=cosmos_model,
+        )
+
+    if target_dir is None:
+        raise ValueError(f"No generated episodes were appended for dataset {dataset_id}")
+    return target_dir
+
+
 def upload_dataset_to_hf(target_dir: Path, repo_id: str, token: str, message: str) -> str:
     os.environ["HF_TOKEN"] = token
     dataset = LeRobotDataset(repo_id=repo_id, root=target_dir, download_videos=False)
@@ -909,5 +940,36 @@ def append_generated_episode_and_upload(
         repo_id=hf_repo_id,
         token=token,
         message=f"Append generated episode {episode_id} from {dataset_id}",
+    )
+    return target_dir, commit_url
+
+
+def append_all_generated_episodes_and_upload(
+    *,
+    dataset_id: str,
+    export_dir: Path,
+    raw_dir: Path,
+    augmented_root: Path,
+    hf_repo_id: str,
+    hf_token_env_var: str = "HF_TOKEN",
+    cosmos_model: str = "edge/distilled",
+    episode_ids: list[int] | None = None,
+) -> tuple[Path, str]:
+    token = os.environ.get(hf_token_env_var)
+    if not token:
+        raise ValueError(f"Missing Hugging Face token in environment variable: {hf_token_env_var}")
+    target_dir = append_all_generated_episodes_to_dataset(
+        dataset_id=dataset_id,
+        export_dir=export_dir,
+        raw_dir=raw_dir,
+        augmented_root=augmented_root,
+        cosmos_model=cosmos_model,
+        episode_ids=episode_ids,
+    )
+    commit_url = upload_dataset_to_hf(
+        target_dir=target_dir,
+        repo_id=hf_repo_id,
+        token=token,
+        message=f"Append all generated episodes from {dataset_id}",
     )
     return target_dir, commit_url
